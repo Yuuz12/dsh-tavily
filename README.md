@@ -33,18 +33,15 @@ npx @deepseek-ai/dsh plugin --profile web remove dsh-tavily
 
 ## 使用
 
-插件提供**两个等价入口**（内容相同，任选其一）：
-
-1. **设置 → 插件 → 插件配置** → 「Tavily 网页搜索」卡片（与内置「终端」「Agent 循环」卡片并列）；
-2. **设置 → 左侧导航「Tavily 搜索」**独立分区（兜底入口，只要插件加载就可见）。
+打开 **设置 → 插件 → 插件配置**，展开「Tavily 网页搜索」卡片（与内置「终端」「Agent 循环」「网页搜索」卡片并列）。
 
 使用步骤：
 
 1. 粘贴一个或多个 Tavily API Key（在 [app.tavily.com](https://app.tavily.com) 免费注册即得，每把每月 1000 积分），点击**添加密钥**。
-2. 点击**刷新全部用量**拉取每个 Key 的官方余额数据。
+2. 点击密钥区右上角**刷新全部用量**拉取每个 Key 的官方余额数据。
 3. 打开顶部的**替换官方网页搜索**开关——状态行显示「已接管网页搜索」即生效。
 
-面板内还可调整：多密钥策略（余额优先 / 手动顺序）、搜索深度（basic=1 积分、advanced=2 积分、fast、ultra-fast）、单次结果上限（1–20）、类别（general/news/finance）、AI 摘要回答（include_answer）。
+卡片内还可调整：多密钥策略（余额优先 / 手动顺序）、搜索深度（basic=1 积分、advanced=2 积分、fast、ultra-fast）、单次结果上限（1–20）、类别（general/news/finance）、AI 摘要回答（include_answer）。
 
 ### 多密钥调度规则
 
