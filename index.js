@@ -451,6 +451,112 @@ function isAbortLike(error, signal) {
 
 //#endregion
 
+//#region optional session guard (dsh-webui-auth compatible) ----------------------------
+//
+// The webServer dispatches by longest-prefix, so any plugin route escapes a
+// blanket auth prefix (dsh-webui-auth wraps `/api` and `/plugins`, but a longer
+// custom prefix wins). Deployments that expose the GUI through a reverse proxy
+// therefore need per-plugin enforcement. When a dsh-webui-auth session store is
+// found on disk we validate its `dsh_wua_session` cookie ourselves — same JSONL
+// replay semantics (add/remove/remove-many/clear + expiry pruning), so logout
+// and password-change revocation apply immediately. Without such a store the
+// endpoints stay open (plain loopback deployments).
+
+function parseCookies(header) {
+  const out = {}
+  for (const part of String(header ?? '').split(';')) {
+    const eq = part.indexOf('=')
+    if (eq === -1) continue
+    const k = part.slice(0, eq).trim()
+    if (k.length > 0) out[k] = part.slice(eq + 1).trim()
+  }
+  return out
+}
+
+/** Candidate locations of dsh-webui-auth's sessions.jsonl (first existing wins). */
+function sessionStoreCandidates() {
+  const candidates = []
+  if (process.env.DSH_WEBUI_AUTH_DATA_DIR) {
+    candidates.push(process.env.DSH_WEBUI_AUTH_DATA_DIR.replace(/\\/g, '/').replace(/\/+$/, '') + '/sessions.jsonl')
+  }
+  const profile = profileDirOf()
+  if (profile) candidates.push(profile.replace(/\\/g, '/').replace(/\/+$/, '') + '/node_modules/dsh-webui-auth/sessions.jsonl')
+  const home = (process.env.DSH_HOME || ((process.env.USERPROFILE || process.env.HOME || '.') + '/.dsh')).replace(/\\/g, '/').replace(/\/+$/, '')
+  candidates.push(home + '/dsh-webui-auth/sessions.jsonl')
+  // Sibling of the package directory (store installs put both under node_modules/).
+  const pdir = pluginDir()
+  if (pdir) candidates.push(pdir.replace(/\\/g, '/').replace(/\/+$/, '') + '/../dsh-webui-auth/sessions.jsonl')
+  return candidates
+}
+
+async function findWebuiAuthSessionsFile(ctx) {
+  for (const candidate of sessionStoreCandidates()) {
+    try {
+      const target = await ctx.fs.resolve(candidate)
+      const text = await ctx.fs.readText(target)
+      if (typeof text === 'string') return target
+    } catch (e) { /* try next candidate */ }
+  }
+  return null
+}
+
+/**
+ * Build a verifier against one sessions.jsonl path. The store disappearing
+ * mid-run degrades verification to open rather than bricking the card.
+ */
+function createSessionVerifier(ctx, sessionsFile) {
+  const COOKIE_NAME = 'dsh_wua_session'
+  function replay(text) {
+    const live = new Map()
+    for (const line of String(text ?? '').split('\n')) {
+      if (!line.trim()) continue
+      let ev = null
+      try { ev = JSON.parse(line) } catch { continue }
+      if (!ev || typeof ev.op !== 'string') continue
+      // 注意：clear 不携带 token、remove-many 携带 tokens 数组，
+      // 因此不能在循环头部统一要求 token 字段。
+      if (ev.op === 'add' && typeof ev.token === 'string' && ev.sess && typeof ev.sess === 'object') {
+        const expiresAt = Number(ev.sess.expiresAt) || 0
+        if (expiresAt > Date.now()) live.set(ev.token, expiresAt)
+      } else if (ev.op === 'remove' && typeof ev.token === 'string') {
+        live.delete(ev.token)
+      } else if (ev.op === 'remove-many' && Array.isArray(ev.tokens)) {
+        for (const t of ev.tokens) live.delete(t)
+      } else if (ev.op === 'clear') {
+        live.clear()
+      }
+    }
+    return live
+  }
+  let cacheText = null
+  let cacheTokens = null
+  async function liveTokens() {
+    try {
+      const target = await ctx.fs.resolve(sessionsFile)
+      const text = await ctx.fs.readText(target)
+      if (text !== cacheText) { cacheText = text; cacheTokens = replay(text) }
+      return cacheTokens || new Map()
+    } catch (e) {
+      cacheText = null; cacheTokens = null
+      return null
+    }
+  }
+  return {
+    enabled: true,
+    async verify(req) {
+      const cookies = parseCookies(req.headers && req.headers.cookie)
+      const token = cookies[COOKIE_NAME]
+      if (!token) return false
+      const tokens = await liveTokens()
+      if (tokens === null) return true
+      const expiresAt = tokens.get(token)
+      return typeof expiresAt === 'number' && expiresAt > Date.now()
+    },
+  }
+}
+
+//#endregion
+
 //#region structured provider error ----------------------------------------------------
 
 /** Mirrors the seam's WebError shape (code field) without importing dsh-web. */
@@ -959,11 +1065,20 @@ export async function apply(ctx, config) {
     stats.lastError = error && error.message ? String(error.message) : String(error)
   }
 
+  //# optional webui-auth session guard ----
+  const sessionStoreFile = await findWebuiAuthSessionsFile(ctx)
+  const sessionVerifier = sessionStoreFile ? createSessionVerifier(ctx, sessionStoreFile) : null
+  if (sessionVerifier) log('info', `[dsh-tavily] 已启用 dsh-webui-auth 会话校验（${sessionStoreFile}）`)
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: HTTP_PREFIX,
     handler: async (req, res) => {
       try {
+        if (sessionVerifier && !(await sessionVerifier.verify(req))) {
+          sendJson(res, 401, { ok: false, error: 'unauthorized: 请先登录 Web UI' })
+          return
+        }
         let pathname = String(req.url ?? '/')
         const q = pathname.indexOf('?')
         if (q !== -1) pathname = pathname.slice(0, q)
@@ -1003,6 +1118,9 @@ export const __internals = {
   pickRoute,
   tavilySearch,
   tavilyUsage,
+  parseCookies,
+  findWebuiAuthSessionsFile,
+  createSessionVerifier,
   TavilySearchProvider,
   TavilyProviderError,
 }

@@ -33,12 +33,18 @@ npx @deepseek-ai/dsh plugin --profile web remove dsh-tavily
 
 ## 使用
 
-1. 重启后在 Web UI 打开 **设置 → 插件 → 插件配置**，展开「Tavily 搜索」卡片。
-2. 粘贴一个或多个 Tavily API Key（在 [app.tavily.com](https://app.tavily.com) 免费注册即得，每把每月 1000 积分），点击**添加密钥**。
-3. 点击**刷新全部用量**拉取每个 Key 的官方余额数据。
-4. 打开顶部的**替换官方网页搜索**开关——状态行显示「已接管网页搜索」即生效。
+插件提供**两个等价入口**（内容相同，任选其一）：
 
-卡片内还可调整：多密钥策略（余额优先 / 手动顺序）、搜索深度（basic=1 积分、advanced=2 积分、fast、ultra-fast）、单次结果上限（1–20）、类别（general/news/finance）、AI 摘要回答（include_answer）。
+1. **设置 → 插件 → 插件配置** → 「Tavily 网页搜索」卡片（与内置「终端」「Agent 循环」卡片并列）；
+2. **设置 → 左侧导航「Tavily 搜索」**独立分区（兜底入口，只要插件加载就可见）。
+
+使用步骤：
+
+1. 粘贴一个或多个 Tavily API Key（在 [app.tavily.com](https://app.tavily.com) 免费注册即得，每把每月 1000 积分），点击**添加密钥**。
+2. 点击**刷新全部用量**拉取每个 Key 的官方余额数据。
+3. 打开顶部的**替换官方网页搜索**开关——状态行显示「已接管网页搜索」即生效。
+
+面板内还可调整：多密钥策略（余额优先 / 手动顺序）、搜索深度（basic=1 积分、advanced=2 积分、fast、ultra-fast）、单次结果上限（1–20）、类别（general/news/finance）、AI 摘要回答（include_answer）。
 
 ### 多密钥调度规则
 
@@ -61,6 +67,16 @@ npx @deepseek-ai/dsh plugin --profile web remove dsh-tavily
 - 密钥**只存本机**，绝不随 HTTP 响应返回完整内容（界面仅见 `tvly-…xxxx` 脱敏形式）。
 - 升级 / 重装插件不会丢失密钥与统计；卸载插件也不会删除该文件，可手动备份或删除。
 - 若插件目录被非常规加载（无法推导 profile 目录），数据文件会回退写到插件目录下的 `dsh-tavily.json`（已在 `.gitignore` 排除）。
+
+### 与 dsh-webui-auth 的集成（安全）
+
+DSH 的 webServer 按最长前缀派发路由，任何插件自定义前缀都会绕过网关级的统一认证前缀（如 [`dsh-webui-auth`](https://github.com/Yuuz12/dsh-webui-auth) 守护的 `/api`、`/plugins`）。本插件对此做了自守卫：
+
+- 启动时按以下顺序探测 dsh-webui-auth 的会话存储 `sessions.jsonl`：环境变量 `DSH_WEBUI_AUTH_DATA_DIR` → `<profile>/node_modules/dsh-webui-auth/` → `$DSH_HOME/dsh-webui-auth/` → 插件目录同级；
+- **一旦找到**，`/dsh-tavily/*` 全部端点要求有效的 `dsh_wua_session` 会话 Cookie（JSONL 重放校验，登出 / 改密撤销即时生效；浏览器同源请求自动携带，无感知）；
+- **未找到**（纯回环部署、未装认证插件）则保持开放。
+
+日志中会出现「已启用 dsh-webui-auth 会话校验」一行表明守卫生效。
 
 ## 工作原理（替换机制）
 
