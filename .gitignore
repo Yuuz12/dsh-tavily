@@ -1,0 +1,10 @@
+node_modules/
+*.tgz
+.scratch/
+
+# 运行数据兜底：正式安装时数据写在 profile 目录，不会进仓库；
+# 但若插件目录被直接当 profile 使用（fallback 路径），密钥文件会落在源码目录，
+# 必须排除在 git 之外。
+dsh-tavily.json
+
+debug.log

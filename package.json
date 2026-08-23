@@ -1,0 +1,43 @@
+{
+  "name": "dsh-tavily",
+  "version": "0.1.0",
+  "description": "Tavily-backed search provider for the DeepSeek Harness web capability seam (ctx.web) — replaces the official web search with multi-key balance-aware rotation, manageable from the DSH web settings (Plugins → Plugin configuration).",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "tavily",
+    "web-search",
+    "search-provider"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-connection"
+      ]
+    }
+  }
+}
