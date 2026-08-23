@@ -241,6 +241,8 @@ function sanitizeData(raw) {
         limit: u.limit === null || u.limit === undefined || u.limit === Infinity ? null : (Number.isFinite(u.limit) && u.limit >= 0 ? u.limit : null),
         searchUsage: Number.isFinite(u.searchUsage) && u.searchUsage >= 0 ? u.searchUsage : null,
         extractUsage: Number.isFinite(u.extractUsage) && u.extractUsage >= 0 ? u.extractUsage : null,
+        planUsage: Number.isFinite(u.planUsage) && u.planUsage >= 0 ? u.planUsage : null,
+        planLimit: u.planLimit === null || u.planLimit === undefined || u.planLimit === Infinity ? null : (Number.isFinite(u.planLimit) && u.planLimit >= 0 ? u.planLimit : null),
       }
     }
   }
@@ -418,9 +420,13 @@ async function tavilyUsage(apiKey, signal) {
     fetchedAt: nowIso(),
     plan: typeof account.current_plan === 'string' ? account.current_plan : null,
     usage: Number.isFinite(keyInfo.usage) ? keyInfo.usage : null,
+    // 密钥级上限：普通账号常为 null（额度记在账户计划上）
     limit: keyInfo.limit === null || keyInfo.limit === undefined ? null : (Number.isFinite(keyInfo.limit) ? keyInfo.limit : null),
     searchUsage: Number.isFinite(keyInfo.search_usage) ? keyInfo.search_usage : null,
     extractUsage: Number.isFinite(keyInfo.extract_usage) ? keyInfo.extract_usage : null,
+    // 账户级计划额度（多密钥共享），作为密钥级上限缺失时的显示回退
+    planUsage: Number.isFinite(account.plan_usage) ? account.plan_usage : null,
+    planLimit: account.plan_limit === null || account.plan_limit === undefined ? null : (Number.isFinite(account.plan_limit) ? account.plan_limit : null),
   }
 }
 
@@ -758,8 +764,10 @@ export async function apply(ctx, config) {
       stats.lastError = null
       stats.lastLatencyMs = ms
       const cached = data.usageCache[keyId]
-      if (cached && cached.usage !== null && cached.usage !== undefined) {
-        cached.usage += credits
+      if (cached) {
+        // 密钥级已用与账户级计划已用各自前推，保证两种口径的显示都保持新鲜
+        if (cached.usage !== null && cached.usage !== undefined) cached.usage += credits
+        if (cached.planUsage !== null && cached.planUsage !== undefined) cached.planUsage += credits
         cached.localAdjustedAt = nowIso()
       }
       scheduleFlush()
