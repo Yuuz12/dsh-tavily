@@ -17,15 +17,19 @@ Zero dependencies, plain JS, no build step.
 ## Install
 
 ```sh
+# users: from npm (recommended)
+npx @deepseek-ai/dsh plugin --profile web add @yuuz12/dsh-tavily
 # maintainer / local dev (link mode)
 npx @deepseek-ai/dsh plugin --profile web add D:/Project/dsh-tavily
 # users: GitHub or tarball
-npx @deepseek-ai/dsh plugin --profile web add github:<user>/dsh-tavily
+npx @deepseek-ai/dsh plugin --profile web add github:Yuuz12/dsh-tavily
 # uninstall
-npx @deepseek-ai/dsh plugin --profile web remove dsh-tavily
+npx @deepseek-ai/dsh plugin --profile web remove @yuuz12/dsh-tavily
 ```
 
 Restart DSH afterwards. If an older copy exists in the profile, `remove` before `add`.
+
+> **DSH version compatibility**: the plugin's client side depends on `@deepseek-ai/dsh-client-store` (settings-card rendering via `createSnapshotStore`), which matches the DSH ≥ 0.1.2-alpha.2 (DSH Desktop 2.0.4) client structure. Older runtimes lack this package and use the removed `dsh-client-runtime`; the settings card cannot render there.
 
 ## How replacement works
 

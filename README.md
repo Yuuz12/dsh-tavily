@@ -18,18 +18,23 @@
 ## 安装 / 卸载
 
 ```sh
+# 使用者：从 npm 安装（推荐）
+npx @deepseek-ai/dsh plugin --profile web add @yuuz12/dsh-tavily
+
 # 维护者 / 本地开发（link 模式，改源码后重启 DSH 即生效）
 npx @deepseek-ai/dsh plugin --profile web add D:/Project/dsh-tavily
 
 # 使用者：从 GitHub 或 tarball
-npx @deepseek-ai/dsh plugin --profile web add github:<user>/dsh-tavily
-npx @deepseek-ai/dsh plugin --profile web add ./dsh-tavily-0.1.0.tgz   # pnpm pack 产物
+npx @deepseek-ai/dsh plugin --profile web add github:Yuuz12/dsh-tavily
+npx @deepseek-ai/dsh plugin --profile web add ./yuuz12-dsh-tavily-0.1.0.tgz   # npm pack 产物
 
 # 卸载
-npx @deepseek-ai/dsh plugin --profile web remove dsh-tavily
+npx @deepseek-ai/dsh plugin --profile web remove @yuuz12/dsh-tavily
 ```
 
 安装后**重启 DSH** 生效。目标 profile 若已装过旧版，先 `remove` 再 `add`。
+
+> **关于 DSH 版本兼容**：本插件 client 端依赖 `@deepseek-ai/dsh-client-store`（设置卡片渲染、`createSnapshotStore`）。该依赖对应 DSH ≥ 0.1.2-alpha.2（DSH Desktop 2.0.4）的客户端结构——更早版本没有这个包且使用已移除的 `dsh-client-runtime`，无法渲染设置卡片。
 
 ## 使用
 
@@ -58,8 +63,8 @@ npx @deepseek-ai/dsh plugin --profile web remove dsh-tavily
 
 | 安装方式 | 密钥/统计数据位置 | 开关与搜索参数位置 |
 |---|---|---|
-| link 本地目录 | `<profile>/dsh-tavily.json`（用户数据，随 profile 持久） | DSH 全局设置文档（`~/.dsh/settings.yaml` 的 `dsh-tavily` 节） |
-| GitHub / tgz / npm | 同上（`<profile>` 为插件所装 profile 目录） | 同上 |
+| link 本地目录 / junction | 插件目录下 `dsh-tavily.json`（见下方回退说明） | DSH 全局设置文档（`~/.dsh/settings.yaml` 的 `dsh-tavily` 节） |
+| npm / GitHub / tgz | `<profile>/dsh-tavily.json`（用户数据，随 profile 持久） | 同上 |
 
 - 密钥**只存本机**，绝不随 HTTP 响应返回完整内容（界面仅见 `tvly-…xxxx` 脱敏形式）。
 - 升级 / 重装插件不会丢失密钥与统计；卸载插件也不会删除该文件，可手动备份或删除。

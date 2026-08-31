@@ -1,5 +1,5 @@
 {
-  "name": "dsh-tavily",
+  "name": "@yuuz12/dsh-tavily",
   "version": "0.1.0",
   "description": "Tavily-backed search provider for the DeepSeek Harness web capability seam (ctx.web) — replaces the official web search with multi-key balance-aware rotation, manageable from the DSH web settings (Plugins → Plugin configuration).",
   "type": "module",
@@ -23,10 +23,23 @@
   "keywords": [
     "deepseek-harness",
     "dsh",
+    "dsh-plugin",
     "tavily",
     "web-search",
-    "search-provider"
+    "search-provider",
+    "cordis"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yuuz12/dsh-tavily.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Yuuz12/dsh-tavily/issues"
+  },
+  "homepage": "https://github.com/Yuuz12/dsh-tavily#readme",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
