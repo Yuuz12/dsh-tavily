@@ -5,4 +5,4 @@
 # overlays) can override this row by id.
 - insert:
     - id: dsh-tavily
-      name: dsh-tavily
+      name: '@yuuz12/dsh-tavily'
