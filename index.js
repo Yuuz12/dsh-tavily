@@ -21,35 +21,55 @@
  *   provider instead of reporting ambiguity.
  *
  * Configuration surfaces:
- * - Settings namespace `dsh-tavily` (schema hand-rolled to stay import-free;
- *   callable + toJSON is all `SettingsProvider` consumes). The Plugins →
- *   Plugin configuration tab dispatches our browser card by this namespace.
- * - Same-origin HTTP endpoints under `/dsh-tavily/*` serve the card: key pool,
- *   per-key usage stats, ordering, tests, and live balance refreshes.
+ * - The browser card (`lib/client.js`) registers itself as a tab on the official
+ *   plugins page (DSH ≥ 0.2.0 list slot `settings.plugins.tab`) and, on hosts
+ *   that still declare it, as a keyed card in the legacy `settings.plugin.item`
+ *   slot. The plugin owns its own storage, so neither slot is a hard dependency.
+ * - Same-origin HTTP endpoints under `/api/dsh-tavily/*` serve the card: config,
+ *   key pool, per-key usage stats, ordering, tests, and live balance refreshes.
+ *   The `/api` mount is deliberate: that surface is what a deployment's auth gate
+ *   owns, so these endpoints inherit the same admission policy as the rest of the
+ *   WebUI API instead of escaping it as a longer root-level prefix would.
  *
- * Data: keys / stats / balance cache persist to `<profile>/dsh-tavily.json`
- * (user-owned, survives upgrades). Secrets never ride HTTP responses — the UI
- * only ever sees masked keys.
+ * Data: config / keys / stats / balance cache persist to `<profile>/dsh-tavily.json`
+ * (user-owned, survives upgrades). The cordis entry config (the profile patch's
+ * `config:` block for our row) only seeds the first run: DSH ≥ 0.2.0 dropped the
+ * namespace-based `ctx.settings.register()` API, so card writes land in that file.
+ * Secrets never ride HTTP responses — the UI only ever sees masked keys.
  */
 
 export const name = 'dsh-tavily'
 
-export const inject = ['web', 'webServer', 'fs', 'settings']
+export const inject = ['web', 'webServer', 'fs']
 
 //#region constants -----------------------------------------------------------------
 
 /** Provider id inside `ctx.web`. Unique against 'deepseek-official' etc. */
 const PROVIDER_ID = 'dsh-tavily'
 
-/** Settings namespace served to the Plugins → Plugin configuration tab. */
-const SETTINGS_NAMESPACE = 'dsh-tavily'
+/** HTTP mount (exact routes only: `${HTTP_PREFIX}` plus the paths below). */
+const HTTP_PREFIX = '/api/dsh-tavily'
 
-/** HTTP mount (prefix match: `/dsh-tavily` and `/dsh-tavily/<sub>`). */
-const HTTP_PREFIX = '/dsh-tavily'
+/**
+ * Every endpoint this plugin serves, registered as its own EXACT route. Keep this in
+ * sync with `pickRoute` and with the client's `api()` calls: a path missing here is a
+ * path the plugin does not serve at all.
+ */
+const HTTP_ROUTES = Object.freeze([
+  HTTP_PREFIX,
+  `${HTTP_PREFIX}/state`,
+  `${HTTP_PREFIX}/config`,
+  `${HTTP_PREFIX}/keys`,
+  `${HTTP_PREFIX}/keys/update`,
+  `${HTTP_PREFIX}/keys/move`,
+  `${HTTP_PREFIX}/keys/test`,
+  `${HTTP_PREFIX}/keys/remove`,
+  `${HTTP_PREFIX}/usage/refresh`,
+])
 
 const TAVILY_SEARCH_URL = 'https://api.tavily.com/search'
 const TAVILY_USAGE_URL = 'https://api.tavily.com/usage'
-const USER_AGENT = 'dsh-tavily/0.1.0 (deepseek-harness plugin)'
+const USER_AGENT = 'dsh-tavily/0.1.1 (deepseek-harness plugin)'
 
 /** Hard cap on one provider attempt; the cooperative tool budget still applies. */
 const ATTEMPT_TIMEOUT_MS = 25_000
@@ -142,13 +162,12 @@ function profileDirOf() {
 
 //#endregion
 
-//#region config normalization + hand-rolled schema ----------------------------------
+//#region config normalization -------------------------------------------------------
 
 /**
- * Total-function normalization of one raw config section. Doubles as the
- * schemastery-style resolver: unknown shapes collapse to defaults, invalid
- * fields snap back instead of throwing (a stored section can never brick the
- * settings service).
+ * Total-function normalization of one raw config section. Unknown shapes collapse
+ * to defaults and invalid fields snap back instead of throwing, so a hand-edited
+ * data file or entry config can never brick plugin startup.
  */
 function normalizeConfig(raw) {
   const v = (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {}
@@ -162,30 +181,9 @@ function normalizeConfig(raw) {
   }
 }
 
-/**
- * Minimal schemastery-compatible schema. `SettingsProvider` only calls the
- * schema as a function (resolve) and `schema.toJSON()` (describe); secret
- * redaction walks `type`/`dict` and passes unknown nodes through untouched.
- */
-function buildSchema() {
-  const schema = (value) => normalizeConfig(value)
-  schema.toJSON = () => ({
-    type: 'object',
-    dict: {
-      enabled: { type: 'boolean', default: CONFIG_DEFAULTS.enabled },
-      strategy: { type: 'string', default: CONFIG_DEFAULTS.strategy },
-      searchDepth: { type: 'string', default: CONFIG_DEFAULTS.searchDepth },
-      maxResults: { type: 'number', default: CONFIG_DEFAULTS.maxResults },
-      topic: { type: 'string', default: CONFIG_DEFAULTS.topic },
-      includeAnswer: { type: 'boolean', default: CONFIG_DEFAULTS.includeAnswer },
-    },
-  })
-  return schema
-}
-
 //#endregion
 
-//#region persisted state (keys / stats / balance cache) ------------------------------
+//#region persisted state (config / keys / stats / balance cache) ---------------------
 
 function emptyStats() {
   return { requests: 0, success: 0, failed: 0, creditsUsed: 0, lastUsedAt: null, lastError: null }
@@ -193,7 +191,10 @@ function emptyStats() {
 
 function sanitizeData(raw) {
   const src = (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {}
-  const out = { keys: [], order: [], stats: {}, usageCache: {} }
+  // `config: null` marks a document without a config section (fresh install or a
+  // file written by an older version) — `apply` seeds it from the entry config.
+  const out = { config: null, keys: [], order: [], stats: {}, usageCache: {} }
+  if (src.config !== undefined && src.config !== null) out.config = normalizeConfig(src.config)
   const seen = new Set()
   if (Array.isArray(src.keys)) {
     for (const entry of src.keys) {
@@ -457,109 +458,27 @@ function isAbortLike(error, signal) {
 
 //#endregion
 
-//#region optional session guard (dsh-webui-auth compatible) ----------------------------
+//#region transport placement (why the mount lives under /api, as exact routes) --------
 //
-// The webServer dispatches by longest-prefix, so any plugin route escapes a
-// blanket auth prefix (dsh-webui-auth wraps `/api` and `/plugins`, but a longer
-// custom prefix wins). Deployments that expose the GUI through a reverse proxy
-// therefore need per-plugin enforcement. When a dsh-webui-auth session store is
-// found on disk we validate its `dsh_wua_session` cookie ourselves — same JSONL
-// replay semantics (add/remove/remove-many/clear + expiry pruning), so logout
-// and password-change revocation apply immediately. Without such a store the
-// endpoints stay open (plain loopback deployments).
-
-function parseCookies(header) {
-  const out = {}
-  for (const part of String(header ?? '').split(';')) {
-    const eq = part.indexOf('=')
-    if (eq === -1) continue
-    const k = part.slice(0, eq).trim()
-    if (k.length > 0) out[k] = part.slice(eq + 1).trim()
-  }
-  return out
-}
-
-/** Candidate locations of dsh-webui-auth's sessions.jsonl (first existing wins). */
-function sessionStoreCandidates() {
-  const candidates = []
-  if (process.env.DSH_WEBUI_AUTH_DATA_DIR) {
-    candidates.push(process.env.DSH_WEBUI_AUTH_DATA_DIR.replace(/\\/g, '/').replace(/\/+$/, '') + '/sessions.jsonl')
-  }
-  const profile = profileDirOf()
-  if (profile) candidates.push(profile.replace(/\\/g, '/').replace(/\/+$/, '') + '/node_modules/dsh-webui-auth/sessions.jsonl')
-  const home = (process.env.DSH_HOME || ((process.env.USERPROFILE || process.env.HOME || '.') + '/.dsh')).replace(/\\/g, '/').replace(/\/+$/, '')
-  candidates.push(home + '/dsh-webui-auth/sessions.jsonl')
-  // Sibling of the package directory (store installs put both under node_modules/).
-  const pdir = pluginDir()
-  if (pdir) candidates.push(pdir.replace(/\\/g, '/').replace(/\/+$/, '') + '/../dsh-webui-auth/sessions.jsonl')
-  return candidates
-}
-
-async function findWebuiAuthSessionsFile(ctx) {
-  for (const candidate of sessionStoreCandidates()) {
-    try {
-      const target = await ctx.fs.resolve(candidate)
-      const text = await ctx.fs.readText(target)
-      if (typeof text === 'string') return target
-    } catch (e) { /* try next candidate */ }
-  }
-  return null
-}
-
-/**
- * Build a verifier against one sessions.jsonl path. The store disappearing
- * mid-run degrades verification to open rather than bricking the card.
- */
-function createSessionVerifier(ctx, sessionsFile) {
-  const COOKIE_NAME = 'dsh_wua_session'
-  function replay(text) {
-    const live = new Map()
-    for (const line of String(text ?? '').split('\n')) {
-      if (!line.trim()) continue
-      let ev = null
-      try { ev = JSON.parse(line) } catch { continue }
-      if (!ev || typeof ev.op !== 'string') continue
-      // 注意：clear 不携带 token、remove-many 携带 tokens 数组，
-      // 因此不能在循环头部统一要求 token 字段。
-      if (ev.op === 'add' && typeof ev.token === 'string' && ev.sess && typeof ev.sess === 'object') {
-        const expiresAt = Number(ev.sess.expiresAt) || 0
-        if (expiresAt > Date.now()) live.set(ev.token, expiresAt)
-      } else if (ev.op === 'remove' && typeof ev.token === 'string') {
-        live.delete(ev.token)
-      } else if (ev.op === 'remove-many' && Array.isArray(ev.tokens)) {
-        for (const t of ev.tokens) live.delete(t)
-      } else if (ev.op === 'clear') {
-        live.clear()
-      }
-    }
-    return live
-  }
-  let cacheText = null
-  let cacheTokens = null
-  async function liveTokens() {
-    try {
-      const target = await ctx.fs.resolve(sessionsFile)
-      const text = await ctx.fs.readText(target)
-      if (text !== cacheText) { cacheText = text; cacheTokens = replay(text) }
-      return cacheTokens || new Map()
-    } catch (e) {
-      cacheText = null; cacheTokens = null
-      return null
-    }
-  }
-  return {
-    enabled: true,
-    async verify(req) {
-      const cookies = parseCookies(req.headers && req.headers.cookie)
-      const token = cookies[COOKIE_NAME]
-      if (!token) return false
-      const tokens = await liveTokens()
-      if (tokens === null) return true
-      const expiresAt = tokens.get(token)
-      return typeof expiresAt === 'number' && expiresAt > Date.now()
-    },
-  }
-}
+// The webServer dispatches by exact path → longest prefix → fallback, and a blanket
+// auth gate is registered as the EMPTY prefix (`path: ''`), the weakest slot in that
+// order. So any route with a prefix of its own outranks the gate and serves anonymous
+// callers — that is the hole this plugin used to have at `/dsh-tavily`.
+//
+// Mounting under `/api` is necessary but NOT sufficient, and the difference is easy to
+// get wrong (it was, once): an auth gate owns the `/api` PREFIX and additionally wraps
+// every EXACT route whose path starts with `/api/` (dsh-webui-auth rescans, so late
+// registrations are caught). A plugin that registers its own PREFIX at
+// `/api/dsh-tavily` therefore still escapes — longest-prefix dispatch hands it the
+// request before the gate's `/api` route is ever consulted. Registering one exact
+// route per endpoint is what actually puts these endpoints behind the deployment's own
+// admission: its session cookie, or the loopback host-direct exemption it grants
+// non-browser callers from this machine. Same policy as the rest of `/api`, nothing
+// reimplemented here to drift out of sync, and deployments with no auth plugin behave
+// as before.
+//
+// Do NOT turn these back into a prefix route, and do NOT move them to a root-level
+// prefix: both silently unprotect the API.
 
 //#endregion
 
@@ -685,32 +604,16 @@ export async function apply(ctx, config) {
     : ((process.env.DSH_HOME || ((process.env.USERPROFILE || process.env.HOME || '.') + '/.dsh')).replace(/\\/g, '/').replace(/\/+$/, '') + '/dsh-tavily.json')
 
   let data = await readData(ctx, dataPath)
+  //# config section ----
+  // The switch and search parameters live in this file next to the keys: DSH
+  // ≥ 0.2.0 removed the namespace-based `ctx.settings.register()` API, so the
+  // card's writes are persisted here. The cordis entry config (the profile
+  // patch's `config:` block for our row) only seeds the first run.
+  if (data.config === null) data.config = normalizeConfig(config)
   const persist = async () => { await writeData(ctx, dataPath, data) }
   // Best-effort flush of a freshly sanitized document; failures must not block startup.
   try { await persist() } catch (e) { log('warn', `[dsh-tavily] 初始数据落盘失败（将继续以内存态运行）: ${e && e.message}`) }
-
-  //# settings section ----
-  let currentConfig = () => ({ ...CONFIG_DEFAULTS })
-  const configEntry = normalizeConfig(config)
-  let settingsBound = false
-  let unregisterSettingsWatch = null
-  try {
-    if (ctx.settings && typeof ctx.settings.register === 'function') {
-      const scope = ctx.settings.register(SETTINGS_NAMESPACE, buildSchema(), { base: configEntry })
-      currentConfig = () => normalizeConfig(scope.get())
-      unregisterSettingsWatch = scope.watch(() => { recompute(); })
-      settingsBound = true
-    } else {
-      log('warn', '[dsh-tavily] settings 服务不可用，配置将保持默认值（开关无法持久化）')
-    }
-  } catch (e) {
-    log('warn', `[dsh-tavily] 注册设置命名空间失败: ${e && e.message}`)
-  }
-  ctx.effect(() => () => {
-    if (typeof unregisterSettingsWatch === 'function') { try { unregisterSettingsWatch() } catch { /* noop */ } }
-    currentConfig = () => ({ ...CONFIG_DEFAULTS })
-    recompute()
-  }, 'dsh-tavily: settings teardown')
+  const currentConfig = () => data.config
 
   //# routing override over WebRuntime.searchProviderId ----
   const ROUTING_MARKER = '__dshTavilyRouting__'
@@ -865,9 +768,9 @@ export async function apply(ctx, config) {
       }
     }
     return {
-      version: '0.1.0',
+      version: '0.1.1',
       config: cfg,
-      settingsBound,
+      configSource: 'file',
       dataPath,
       routing: {
         active: routeActive && providerRegistered,
@@ -920,12 +823,11 @@ export async function apply(ctx, config) {
         if (typeof body.includeAnswer !== 'boolean') { sendJson(res, 400, { ok: false, error: 'includeAnswer 必须是布尔值' }); return }
         patch.includeAnswer = body.includeAnswer
       }
-      if (settingsBound) {
-        try { await ctx.settings.update(SETTINGS_NAMESPACE, patch) } catch (e) {
-          sendJson(res, 500, { ok: false, error: `写入设置失败: ${e && e.message}` }); return
-        }
-      } else {
-        sendJson(res, 500, { ok: false, error: 'settings 服务不可用，无法保存配置' }); return
+      const previousConfig = data.config
+      data.config = normalizeConfig({ ...previousConfig, ...patch })
+      try { await persist() } catch (e) {
+        data.config = previousConfig // 回滚，避免面板显示已开启却没落盘
+        sendJson(res, 500, { ok: false, error: `配置落盘失败: ${e && e.message}` }); return
       }
       recompute()
       sendJson(res, 200, { ok: true, state: publicState() })
@@ -1073,36 +975,34 @@ export async function apply(ctx, config) {
     stats.lastError = error && error.message ? String(error.message) : String(error)
   }
 
-  //# optional webui-auth session guard ----
-  const sessionStoreFile = await findWebuiAuthSessionsFile(ctx)
-  const sessionVerifier = sessionStoreFile ? createSessionVerifier(ctx, sessionStoreFile) : null
-  if (sessionVerifier) log('info', `[dsh-tavily] 已启用 dsh-webui-auth 会话校验（${sessionStoreFile}）`)
+  //# http endpoints ----
+  // One EXACT route per endpoint, deliberately not a prefix route: a gate wraps the
+  // `/api` prefix plus every exact route beneath it, while a plugin-declared prefix
+  // (even a nested one like `/api/dsh-tavily`) wins longest-prefix dispatch and would
+  // never be seen by the gate. Exact routes also mean unknown sub-paths never reach
+  // this plugin at all. See the "transport placement" note at the top of the file.
+  async function serveHttp(req, res) {
+    try {
+      let pathname = String(req.url ?? '/')
+      const q = pathname.indexOf('?')
+      if (q !== -1) pathname = pathname.slice(0, q)
+      const sub = pathname.startsWith(HTTP_PREFIX) ? pathname.slice(HTTP_PREFIX.length) : pathname
+      const route = pickRoute(req.method, sub)
+      const handler = handlers[route.action]
+      if (!handler) { sendJson(res, 404, { ok: false, error: `未知端点: ${req.method} ${pathname}` }); return }
+      await handler(req, res)
+    } catch (error) {
+      const syntax = error instanceof SyntaxError
+      sendJson(res, syntax ? 400 : 500, { ok: false, error: error && error.message ? error.message : String(error) })
+    }
+  }
 
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'prefix',
-    path: HTTP_PREFIX,
-    handler: async (req, res) => {
-      try {
-        if (sessionVerifier && !(await sessionVerifier.verify(req))) {
-          sendJson(res, 401, { ok: false, error: 'unauthorized: 请先登录 Web UI' })
-          return
-        }
-        let pathname = String(req.url ?? '/')
-        const q = pathname.indexOf('?')
-        if (q !== -1) pathname = pathname.slice(0, q)
-        const sub = pathname.startsWith(HTTP_PREFIX) ? pathname.slice(HTTP_PREFIX.length) : pathname
-        const route = pickRoute(req.method, sub)
-        const handler = handlers[route.action]
-        if (!handler) { sendJson(res, 404, { ok: false, error: `未知端点: ${req.method} ${pathname}` }); return }
-        await handler(req, res)
-      } catch (error) {
-        const syntax = error instanceof SyntaxError
-        sendJson(res, syntax ? 400 : 500, { ok: false, error: error && error.message ? error.message : String(error) })
-      }
-    },
-  }), 'dsh-tavily: http endpoints')
+  ctx.effect(() => {
+    const disposers = HTTP_ROUTES.map((path) => ctx.webServer.register({ kind: 'exact', path, handler: serveHttp }))
+    return () => { for (const dispose of disposers) { try { dispose() } catch { /* already gone */ } } }
+  }, 'dsh-tavily: http endpoints')
 
-  log('info', `[dsh-tavily] 已加载。数据文件: ${dataPath}；路由状态: ${routeActive ? '已接管网页搜索' : '未接管'}；官方搜索提供方${web.searchProviders && web.searchProviders.has('deepseek-official') ? '已检测到' : '未检测到'}。`)
+  log('info', `[dsh-tavily] 已加载。数据文件: ${dataPath}；HTTP 端点: ${HTTP_ROUTES.join(', ')}（/api 下的 exact 路由，随部署认证闸门）；路由状态: ${routeActive ? '已接管网页搜索' : '未接管'}；官方搜索提供方${web.searchProviders && web.searchProviders.has('deepseek-official') ? '已检测到' : '未检测到'}。`)
 }
 
 //#endregion
@@ -1112,10 +1012,9 @@ export async function apply(ctx, config) {
 export const __internals = {
   CONFIG_DEFAULTS,
   PROVIDER_ID,
-  SETTINGS_NAMESPACE,
   HTTP_PREFIX,
+  HTTP_ROUTES,
   normalizeConfig,
-  buildSchema,
   sanitizeData,
   maskKey,
   usableKeys,
@@ -1126,9 +1025,6 @@ export const __internals = {
   pickRoute,
   tavilySearch,
   tavilyUsage,
-  parseCookies,
-  findWebuiAuthSessionsFile,
-  createSessionVerifier,
   TavilySearchProvider,
   TavilyProviderError,
 }

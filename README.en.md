@@ -6,7 +6,7 @@ English | [中文](README.md)
 
 The model's `web_search` tool stops calling the built-in search provider and goes through the [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search.md) instead.
 
-- **Instant toggle** — a "Tavily search" card under Settings → Plugins → Plugin configuration; turning it off falls back to the official search immediately, no restart needed.
+- **Instant toggle** — a "Tavily web search" page under Settings → Plugins (a tab inside "Built-in plugins" on DSH ≥ 0.2.0, a collapsible card under "Plugin configuration" on older hosts); turning it off falls back to the official search immediately, no restart needed.
 - **Multi-key pool** — add any number of Tavily API keys and inspect per-key usage stats and balances.
 - **Balance-first rotation** — keys with more remaining credits go first; tied leaders rotate request by request. A manual fixed order is also available.
 - **Failover** — auth failures, exhausted quotas, or rate limits roll over to the next key; hard failures cool a key down for 5 minutes (429 for 30s).
@@ -29,7 +29,9 @@ npx @deepseek-ai/dsh plugin --profile web remove @yuuz12/dsh-tavily
 
 Restart DSH afterwards. If an older copy exists in the profile, `remove` before `add`.
 
-> **DSH version compatibility**: the plugin's client side depends on `@deepseek-ai/dsh-client-store` (settings-card rendering via `createSnapshotStore`), which matches the DSH ≥ 0.1.2-alpha.2 (DSH Desktop 2.0.4) client structure. Older runtimes lack this package and use the removed `dsh-client-runtime`; the settings card cannot render there.
+> **DSH version compatibility**: the client half only uses platform-provided modules (`react`, `@deepseek-ai/dsh-client-store` — both part of the client static seed table) and the plugin itself has zero imports, so `@deepseek-ai/*` version drift cannot break it.
+>
+> **Officially packaged builds (DSH Desktop / dsh-desktop ≥ 0.2.0)**: the client module must register under its **package name** (`@yuuz12/dsh-tavily`) — the boot graph's entry id comes from `name` in package.json, and a short id makes web boot report the entry as "import failed". 0.2.0 also removed the `ctx.settings.register()` namespace API, so the toggle and search parameters now live in the plugin's own data file (see "Data locations").
 
 ## How replacement works
 
@@ -41,6 +43,10 @@ Restart DSH afterwards. If an older copy exists in the profile, `remove` before 
 
 ## Data locations
 
-Keys/stats live in `<profile>/dsh-tavily.json` (user-owned, survives upgrades/uninstall); the toggle and search parameters live in the global settings document (`~/.dsh/settings.yaml`, section `dsh-tavily`). Full keys never cross HTTP responses — the UI only sees masked forms like `tvly-…xxxx`.
+Keys, stats, the toggle and the search parameters all live in `<profile>/dsh-tavily.json` (user-owned, survives upgrades/uninstall; the host entry config — `config:` on our profile-patch row — only seeds the first run). Full keys never cross HTTP responses — the UI only sees masked forms like `tvly-…xxxx`.
+
+## Authentication
+
+The card's HTTP endpoints are registered as **exact routes under `/api/dsh-tavily/...`**, never as a prefix route of their own. The webServer dispatches by exact path → longest prefix → fallback, and a deployment's auth gate sits on the *empty* prefix — the weakest slot — so a plugin-declared prefix would outrank it and serve anonymous callers. That holds even for a nested prefix such as `/api/dsh-tavily`: gates own the `/api` prefix plus the **exact** routes beneath it (re-scanned, so late registrations are caught), while a plugin prefix wins longest-prefix dispatch before the gate is ever consulted. With exact routes these endpoints inherit exactly the same admission policy as the rest of the WebUI API: password session cookie, or the loopback host-direct exemption a desktop shell relies on. Deployments with no auth plugin stay as open as before.
 
 See the Chinese README for scheduling rules, FAQ, and development notes.

@@ -1,6 +1,6 @@
 {
   "name": "@yuuz12/dsh-tavily",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tavily-backed search provider for the DeepSeek Harness web capability seam (ctx.web) — replaces the official web search with multi-key balance-aware rotation, manageable from the DSH web settings (Plugins → Plugin configuration).",
   "type": "module",
   "main": "index.js",

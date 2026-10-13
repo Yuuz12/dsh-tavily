@@ -6,7 +6,7 @@
 
 模型的 `web_search` 工具不再调用 DSH 内置的搜索提供方，而是改走 [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search.md)。支持：
 
-- **随时开关**：在 设置 → 插件 → **插件配置** 的「Tavily 搜索」卡片里一键切换；关闭后立即回落到官方搜索，无需重启。
+- **随时开关**：在 设置 → 插件 的「Tavily 网页搜索」页面一键切换（官方 ≥ 0.2.0 是「内置插件」里的一个标签页，旧版宿主是「插件配置」里的折叠卡片）；关闭后立即回落到官方搜索，无需重启。
 - **多 API Key 池**：添加任意多个 Tavily Key，分别查看每个 Key 的用量统计与余额。
 - **余额优先轮流**：自动按剩余额度排序，额度多的先用；剩余额度并列的密钥轮流使用。
 - **手动顺序**：也可切换为按自定义顺序从上到下使用。
@@ -26,7 +26,7 @@ npx @deepseek-ai/dsh plugin --profile web add D:/Project/dsh-tavily
 
 # 使用者：从 GitHub 或 tarball
 npx @deepseek-ai/dsh plugin --profile web add github:Yuuz12/dsh-tavily
-npx @deepseek-ai/dsh plugin --profile web add ./yuuz12-dsh-tavily-0.1.0.tgz   # npm pack 产物
+npx @deepseek-ai/dsh plugin --profile web add ./yuuz12-dsh-tavily-0.1.1.tgz   # npm pack 产物
 
 # 卸载
 npx @deepseek-ai/dsh plugin --profile web remove @yuuz12/dsh-tavily
@@ -34,11 +34,14 @@ npx @deepseek-ai/dsh plugin --profile web remove @yuuz12/dsh-tavily
 
 安装后**重启 DSH** 生效。目标 profile 若已装过旧版，先 `remove` 再 `add`。
 
-> **关于 DSH 版本兼容**：本插件 client 端依赖 `@deepseek-ai/dsh-client-store`（设置卡片渲染、`createSnapshotStore`）。该依赖对应 DSH ≥ 0.1.2-alpha.2（DSH Desktop 2.0.4）的客户端结构——更早版本没有这个包且使用已移除的 `dsh-client-runtime`，无法渲染设置卡片。
+> **关于 DSH 版本兼容**：client 端只使用平台自带模块（`react`、`@deepseek-ai/dsh-client-store`——都属于客户端静态种子表），插件自身零 import，因此不受 `@deepseek-ai/*` 版本漂移影响。
+>
+> **官方打包版（DSH Desktop / dsh-desktop ≥ 0.2.0）适配**：客户端模块必须以**包名**（`@yuuz12/dsh-tavily`）注册——boot graph 的 entry id 取自 package.json 的 `name`，写成短名会让 web boot 判定该条目 import 失败；同时 0.2.0 移除了 `ctx.settings.register()` 命名空间 API，开关与搜索参数改由插件自己的数据文件持有（见下方「数据存储位置」）。
 
 ## 使用
 
-打开 **设置 → 插件 → 插件配置**，展开「Tavily 网页搜索」卡片（与内置「终端」「Agent 循环」「网页搜索」卡片并列）。
+官方 ≥ 0.2.0：打开 **设置 → 插件**，切到「Tavily 网页搜索」标签页（与内置「插件清单」标签页并列）。
+旧版宿主：打开 **设置 → 插件 → 插件配置**，展开「Tavily 网页搜索」卡片。
 
 使用步骤：
 
@@ -61,24 +64,28 @@ npx @deepseek-ai/dsh plugin --profile web remove @yuuz12/dsh-tavily
 
 ## 数据存储位置
 
-| 安装方式 | 密钥/统计数据位置 | 开关与搜索参数位置 |
-|---|---|---|
-| link 本地目录 / junction | 插件目录下 `dsh-tavily.json`（见下方回退说明） | DSH 全局设置文档（`~/.dsh/settings.yaml` 的 `dsh-tavily` 节） |
-| npm / GitHub / tgz | `<profile>/dsh-tavily.json`（用户数据，随 profile 持久） | 同上 |
+| 安装方式 | 密钥 / 统计 / 开关与搜索参数的位置 |
+|---|---|
+| link 本地目录 / junction | 插件目录下 `dsh-tavily.json`（见下方回退说明） |
+| npm / GitHub / tgz | `<profile>/dsh-tavily.json`（用户数据，随 profile 持久） |
 
+- 配置与密钥同在一份 `dsh-tavily.json`：`config` 节存开关与搜索参数，宿主条目配置（profile patch 里本行的 `config:`）只在首次运行时作为播种值。
 - 密钥**只存本机**，绝不随 HTTP 响应返回完整内容（界面仅见 `tvly-…xxxx` 脱敏形式）。
-- 升级 / 重装插件不会丢失密钥与统计；卸载插件也不会删除该文件，可手动备份或删除。
+- 升级 / 重装插件不会丢失密钥、统计与开关；卸载插件也不会删除该文件，可手动备份或删除。
 - 若插件目录被非常规加载（无法推导 profile 目录），数据文件会回退写到插件目录下的 `dsh-tavily.json`（已在 `.gitignore` 排除）。
 
-### 与 dsh-webui-auth 的集成（安全）
+### 与部署级认证的关系（安全）
 
-DSH 的 webServer 按最长前缀派发路由，任何插件自定义前缀都会绕过网关级的统一认证前缀（如 [`dsh-webui-auth`](https://github.com/Yuuz12/dsh-webui-auth) 守护的 `/api`、`/plugins`）。本插件对此做了自守卫：
+DSH 的 webServer 按「exact 路径 → 最长前缀 → fallback」派发，而认证闸门注册在**空前缀**（`path: ''`）——那是这个顺序里最弱的一档。插件若自建根级前缀（例如 `/dsh-tavily`），就会排在闸门之前，匿名请求直接落到插件自己的 handler，等于在 WebUI 的认证边界上开了一个洞。
 
-- 启动时按以下顺序探测 dsh-webui-auth 的会话存储 `sessions.jsonl`：环境变量 `DSH_WEBUI_AUTH_DATA_DIR` → `<profile>/node_modules/dsh-webui-auth/` → `$DSH_HOME/dsh-webui-auth/` → 插件目录同级；
-- **一旦找到**，`/dsh-tavily/*` 全部端点要求有效的 `dsh_wua_session` 会话 Cookie（JSONL 重放校验，登出 / 改密撤销即时生效；浏览器同源请求自动携带，无感知）；
-- **未找到**（纯回环部署、未装认证插件）则保持开放。
+所以本插件的每个端点都注册为 **`/api/dsh-tavily/...` 下的 exact 路由**（`/api/dsh-tavily`、`/state`、`/config`、`/keys`、`/keys/update`、`/keys/move`、`/keys/test`、`/keys/remove`、`/usage/refresh`）：
 
-日志中会出现「已启用 dsh-webui-auth 会话校验」一行表明守卫生效。
+- `/api` 是部署级认证（如 [`dsh-webui-auth`](https://github.com/Yuuz12/dsh-webui-auth)）必然接管的前缀，它连同**该前缀下的 exact 路由**一起包装（2 秒重扫，能捕获晚注册的路由），因此每个请求都先经过部署自己的准入判定：口令会话 Cookie，或该部署为桌面端保留的回环「宿主直连」豁免；
+- **必须是 exact 路由，不能是前缀路由**：闸门只认 `/api` 这一个前缀键，插件自己声明的前缀（哪怕嵌在 `/api/dsh-tavily` 之下）会在最长前缀派发里胜出，从而绕过闸门——这一点踩过一次，`index.js` 的 `transport placement` 注释里留了记录；
+- 准入策略因此与 WebUI 其余 API **完全一致**，不需要插件重复实现一套——也就不会因版本演进而失配（此前那套「探测 `sessions.jsonl` 自行校验」的自守卫，在 `link:` 安装下推不出 profile 目录，会静默失效；即便生效，它读到的也是未随浏览器会话滑动的过期时间，会误伤正常会话）；
+- 浏览器同源请求自动携带 Cookie，使用上无感知；未安装认证插件的纯回环部署维持原样（不额外设限）。
+
+> 用反向代理 / 隧道把 WebUI 暴露到本机之外时，请确认部署装了认证插件：只依赖内核 BrowserAuth 的部署不会自动覆盖第三方插件的路由。
 
 ## 工作原理（替换机制）
 
@@ -95,16 +102,16 @@ Tavily 响应按 `ctx.web` 词汇投影：`results[]` → `sources[]`（url/titl
 - **开启后报 `WEB_PROVIDER_AMBIGUOUS`？** 说明当前运行时没有应用路由接管（见工作原理第 2 步的防御路径）。请反馈你的 DSH 版本；临时方案是关闭开关回到官方搜索。
 - **没配 DeepSeek Key 的部署能用吗？** 能。此时本插件往往是唯一可用提供方，即使不依赖路由接管也能被自动选中。
 - **测试按钮会花钱吗？** 会发起一次真实的 basic 搜索，消耗 1 积分。
-- **多个 DSH profile 共享开关吗？** 开关存在全局 settings 文档里（跨 profile 共享）；密钥池按 profile 隔离。
+- **多个 DSH profile 共享开关吗？** 不共享：开关、密钥池、统计都在该 profile（或插件目录）的 `dsh-tavily.json` 里，各 profile 彼此独立。
 
 ## 开发与自检
 
 ```sh
 node --check index.js && node --check lib/client.js   # 语法
-node .scratch/selftest.mjs                            # 26 例离线自检（纯函数 + mock ctx 集成）
+node .scratch/selftest.mjs                            # 34 例离线自检（纯函数 + mock ctx 集成 + client 包契约）
 ```
 
-自检覆盖：配置归一化、密钥排序（余额/手动/冷却/轮转）、seam 响应映射、HTTP 路由表、注册与卸载还原、选择语义（含歧义防御）、failover 与积分记账、脱敏、持久化往返。
+自检覆盖：配置归一化、密钥排序（余额/手动/冷却/轮转）、seam 响应映射、HTTP 路由表、注册与卸载还原、选择语义（含歧义防御）、failover 与积分记账、配置落盘与回滚、脱敏、持久化往返，以及 client 包的注册 id / slot 注册 / 卡片渲染契约。
 
 ## License
 
