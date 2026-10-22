@@ -26,7 +26,7 @@ npx @deepseek-ai/dsh plugin --profile web add D:/Project/dsh-tavily
 
 # 使用者：从 GitHub 或 tarball
 npx @deepseek-ai/dsh plugin --profile web add github:Yuuz12/dsh-tavily
-npx @deepseek-ai/dsh plugin --profile web add ./yuuz12-dsh-tavily-0.1.1.tgz   # npm pack 产物
+npx @deepseek-ai/dsh plugin --profile web add ./yuuz12-dsh-tavily-0.2.0.tgz   # npm pack 产物
 
 # 卸载
 npx @deepseek-ai/dsh plugin --profile web remove @yuuz12/dsh-tavily
@@ -89,20 +89,23 @@ DSH 的 webServer 按「exact 路径 → 最长前缀 → fallback」派发，�
 
 ## 工作原理（替换机制）
 
-DSH 的网页搜索走 `ctx.web` 能力缝：工具层每次执行时由 `WebRuntime` 解析搜索提供方——若配置了 `searchProviderId` 就用它，否则在"恰好只有一个可用提供方"时自动选择。本插件：
+DSH 的网页搜索走 `ctx.web` 能力缝，提供方在**每次调用时**解析。不同版本解析的地方不一样，本插件对两种都做了适配：
 
 1. 通过公开 API `ctx.web.registerSearchProvider()` 注册 id 为 `dsh-tavily` 的搜索提供方；
-2. 将实例字段 `searchProviderId` 重定义为可逆 accessor：开关开启且有可用密钥时读取值为 `dsh-tavily`，否则透传原基线值（未配置为 undefined；若设置了 `$DSH_WEB_SEARCH_PROVIDER` 环境变量则尊重之）。外部写入会更新基线；插件卸载时摘除 accessor 并还原原始属性描述符；
-3. `available()` 与接管条件保持一致，因此即使未来版本不再读取该字段，自动选择也会优雅回落到官方提供方而不是报歧义错误。
+2. **DSH ≥ 0.2.x（当前）**：运行时从 `@deepseek-ai/dsh-web` 这一行组合出的 `searchProvider` 配置里取提供方（官方 base 层默认钉死 `deepseek-official`）。插件通过 `ctx.configEditor.edit()` 把 `searchProvider` 写成 `dsh-tavily`，写入落在当前 profile 的 `cordis.patch.yml` 并立即热生效；关闭开关时把**写入前的有效配置**原样还原（若还原值等于继承值，整行配置会被移除）。写入前会记下原值，进程重启后继续有效，不需要重新点开关。
+   - 写入必须从**请求上下文**发起：插件激活本身处在 profile 重载的 HMR 事务里，而 `configEditor` 要开自己的独占事务，嵌套会被拒绝（`HMR transactions cannot be nested`）。所以面板打开时会调用一次 `POST /api/dsh-tavily/takeover` 补齐；`/state` 里的 `routing.pending` 标记这种"开关开着但还没接管"的中间态。
+3. **DSH ≤ 0.1.x（旧版）**：运行时读可变的 `web.searchProviderId` 字段，插件把它重定义为可逆 accessor，开关开启且有可用密钥时读取值为 `dsh-tavily`，否则透传原基线值；插件卸载时摘除 accessor 并还原原始属性描述符。
+4. `available()` 与接管条件保持一致，因此即使没有任何接管接口，自动选择也会优雅回落到官方提供方而不是报歧义错误；此时 `routing.mode` 为 `none`，面板会直接说明当前 DSH 版本无法自动切换。
 
 Tavily 响应按 `ctx.web` 词汇投影：`results[]` → `sources[]`（url/title/snippet/publishedAt），`answer` → `content`。`max_results` 取工具请求与面板上限的较小值。
 
 ## 常见问题
 
-- **开启后报 `WEB_PROVIDER_AMBIGUOUS`？** 说明当前运行时没有应用路由接管（见工作原理第 2 步的防御路径）。请反馈你的 DSH 版本；临时方案是关闭开关回到官方搜索。
-- **没配 DeepSeek Key 的部署能用吗？** 能。此时本插件往往是唯一可用提供方，即使不依赖路由接管也能被自动选中。
+- **开关开着但状态行说「接管尚未生效」？** 看 `GET /api/dsh-tavily/state` 的 `routing`：`mode` 是 `none` 表示当前 DSH 没有可用的接管接口（把 `web` 行的 `searchProvider` 手动设为 `dsh-tavily`）；`pending: true` 表示还没写进去，打开面板或调一次 `POST /api/dsh-tavily/takeover` 即可补齐。
+- **没配 DeepSeek Key 的部署能用吗？** 能。此时本插件往往是唯一可用提供方，即使不依赖接管也能被自动选中。
 - **测试按钮会花钱吗？** 会发起一次真实的 basic 搜索，消耗 1 积分。
-- **多个 DSH profile 共享开关吗？** 不共享：开关、密钥池、统计都在该 profile（或插件目录）的 `dsh-tavily.json` 里，各 profile 彼此独立。
+- **多个 DSH profile 共享开关吗？** 不共享：开关、密钥池、统计都在该 profile（或插件目录）的 `dsh-tavily.json` 里，各 profile 彼此独立；接管写在本 profile 的 `cordis.patch.yml`。
+- **卸载前要做什么？** 先把开关关掉再卸载/禁用插件：关闭会把 `web` 行还原。插件如果被直接卸载，留在 patch 里的 `searchProvider: dsh-tavily` 会指向一个不存在的提供方，搜索会报 `WEB_PROVIDER_CONFIGURED_MISSING` —— 手动删掉 `cordis.patch.yml` 里那行 `- id: web` 的 `config` 即可恢复。
 
 ## 开发与自检
 

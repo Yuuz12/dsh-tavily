@@ -9,16 +9,14 @@
  * How replacement works (see README for the full story):
  * - A search provider `{ id: 'dsh-tavily', available(), search() }` registers
  *   through the public seam API `ctx.web.registerSearchProvider()`.
- * - `WebRuntime` resolves the provider at call time from its `searchProviderId`
- *   field (configured id wins; otherwise the single usable provider runs). We
- *   redefine that field as an accessor on the service instance: while the user
- *   switch is ON and at least one key is usable, reads yield 'dsh-tavily';
- *   otherwise they fall through to the untouched baseline (undefined or an
- *   explicit `$DSH_WEB_SEARCH_PROVIDER` value). The override is reversible and
- *   removed when the plugin unloads.
- * - `available()` mirrors the same condition, so even if a future runtime stops
- *   consulting the field, auto-selection degrades gracefully to the official
- *   provider instead of reporting ambiguity.
+ * - The seam resolves the provider at call time. Two runtime shapes are supported:
+ *   DSH ≤ 0.1.x read a mutable `web.searchProviderId`, so we redefine that field as
+ *   an accessor (legacy mode); DSH ≥ 0.2.x removed it and reads the composed
+ *   `searchProvider` config of its `web` Loader row, so we pin that value through
+ *   `ctx.configEditor` while the switch is ON and restore the previous effective
+ *   config when it goes OFF (config mode). Either way the override is reversible.
+ * - `available()` mirrors the switch, so even a deployment that pins nothing never
+ *   reports ambiguity; it simply keeps serving the official provider.
  *
  * Configuration surfaces:
  * - The browser card (`lib/client.js`) registers itself as a tab on the official
@@ -59,6 +57,7 @@ const HTTP_ROUTES = Object.freeze([
   HTTP_PREFIX,
   `${HTTP_PREFIX}/state`,
   `${HTTP_PREFIX}/config`,
+  `${HTTP_PREFIX}/takeover`,
   `${HTTP_PREFIX}/keys`,
   `${HTTP_PREFIX}/keys/update`,
   `${HTTP_PREFIX}/keys/move`,
@@ -69,7 +68,7 @@ const HTTP_ROUTES = Object.freeze([
 
 const TAVILY_SEARCH_URL = 'https://api.tavily.com/search'
 const TAVILY_USAGE_URL = 'https://api.tavily.com/usage'
-const USER_AGENT = 'dsh-tavily/0.1.1 (deepseek-harness plugin)'
+const USER_AGENT = 'dsh-tavily/0.2.0 (deepseek-harness plugin)'
 
 /** Hard cap on one provider attempt; the cooperative tool budget still applies. */
 const ATTEMPT_TIMEOUT_MS = 25_000
@@ -189,12 +188,44 @@ function emptyStats() {
   return { requests: 0, success: 0, failed: 0, creditsUsed: 0, lastUsedAt: null, lastError: null }
 }
 
+/**
+ * Durable bookkeeping for the config-mode takeover: `pinnedByUs` says whether this
+ * plugin wrote `web.searchProvider`, `savedConfig` keeps the effective config from
+ * just before that write so turning the switch off restores it exactly.
+ */
+function emptyTakeover() {
+  return { pinnedByUs: false, savedConfig: null }
+}
+
+/**
+ * The Loader row that owns `ctx.web`. Row ids vary by composition, so match the
+ * package name; `ctx.configEditor` only accepts entries it can address in the
+ * profile patch, which is exactly this row in the shipped compositions.
+ */
+function findWebEntry(ctx) {
+  try {
+    const loader = typeof ctx.get === 'function' ? ctx.get('loader') : undefined
+    if (!loader || typeof loader.entries !== 'function') return null
+    const rows = [...loader.entries()].filter((entry) => entry && entry.options && entry.options.name === '@deepseek-ai/dsh-web')
+    if (rows.length === 0) return null
+    return rows.find((entry) => entry.options.id === 'web') || rows[0]
+  } catch (e) {
+    return null
+  }
+}
+
 function sanitizeData(raw) {
   const src = (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {}
   // `config: null` marks a document without a config section (fresh install or a
   // file written by an older version) — `apply` seeds it from the entry config.
-  const out = { config: null, keys: [], order: [], stats: {}, usageCache: {} }
+  const out = { config: null, keys: [], order: [], stats: {}, usageCache: {}, takeover: emptyTakeover() }
   if (src.config !== undefined && src.config !== null) out.config = normalizeConfig(src.config)
+  if (src.takeover && typeof src.takeover === 'object' && !Array.isArray(src.takeover)) {
+    out.takeover.pinnedByUs = src.takeover.pinnedByUs === true
+    if (src.takeover.savedConfig && typeof src.takeover.savedConfig === 'object' && !Array.isArray(src.takeover.savedConfig)) {
+      out.takeover.savedConfig = { ...src.takeover.savedConfig }
+    }
+  }
   const seen = new Set()
   if (Array.isArray(src.keys)) {
     for (const entry of src.keys) {
@@ -508,6 +539,7 @@ function pickRoute(method, sub) {
   if (parts.length === 0 && (method === 'GET' || method === 'HEAD')) return { action: 'state' }
   if (parts.length === 1 && parts[0] === 'state' && method === 'GET') return { action: 'state' }
   if (parts.length === 1 && parts[0] === 'config' && method === 'POST') return { action: 'config' }
+  if (parts.length === 1 && parts[0] === 'takeover' && method === 'POST') return { action: 'takeover' }
   if (parts.length === 1 && parts[0] === 'keys' && method === 'POST') return { action: 'keys.add' }
   if (parts.length === 2 && parts[0] === 'keys' && parts[1] === 'update' && method === 'POST') return { action: 'keys.update' }
   if (parts.length === 2 && parts[0] === 'keys' && parts[1] === 'move' && method === 'POST') return { action: 'keys.move' }
@@ -615,7 +647,15 @@ export async function apply(ctx, config) {
   try { await persist() } catch (e) { log('warn', `[dsh-tavily] 初始数据落盘失败（将继续以内存态运行）: ${e && e.message}`) }
   const currentConfig = () => data.config
 
-  //# routing override over WebRuntime.searchProviderId ----
+  //# routing takeover over the pinned search provider ----
+  // DSH ≤ 0.1.x resolved the search provider from a mutable `web.searchProviderId`
+  // field. DSH ≥ 0.2.x removed that field: the service reads the composed
+  // `searchProvider` config of its own Loader row at call time (dsh-base pins
+  // `deepseek-official` there). Two takeover modes follow:
+  //   legacy — redefine that accessor while the switch is on (≤ 0.1.x only);
+  //   config — write `searchProvider: dsh-tavily` into the profile patch through
+  //            `ctx.configEditor` (0.2.x) and restore the previous effective
+  //            config when the switch turns off or the plugin stops being active.
   const ROUTING_MARKER = '__dshTavilyRouting__'
   const web = ctx.web
   const existing = Object.getOwnPropertyDescriptor(web, 'searchProviderId')
@@ -623,6 +663,9 @@ export async function apply(ctx, config) {
   let baseline = web.searchProviderId
   let overrideInstalled = false
   let routeActive = false
+  let takeoverMode = 'none'
+  let takeoverError = null
+  let takeoverBusy = false
 
   if (!alreadyOurs && existing && existing.configurable) {
     const originalDescriptor = existing
@@ -635,6 +678,7 @@ export async function apply(ctx, config) {
       set(value) { baseline = value }, // external writers (env wiring, other plugins) become the new baseline
     })
     overrideInstalled = true
+    takeoverMode = 'legacy'
     ctx.effect(() => () => {
       routeActive = false
       try {
@@ -644,8 +688,92 @@ export async function apply(ctx, config) {
     }, 'dsh-tavily: routing override teardown')
   } else if (alreadyOurs) {
     overrideInstalled = true
+    takeoverMode = 'legacy'
   } else {
-    log('warn', '[dsh-tavily] 无法接管 web.searchProviderId（属性不可配置）；替换功能将依赖自动选择，可能与官方搜索产生歧义冲突')
+    // 0.2.x path: find the `web` Loader row and the profile config editor.
+    const configEditor = typeof ctx.get === 'function' ? ctx.get('configEditor') : undefined
+    takeoverMode = (configEditor && findWebEntry(ctx)) ? 'config' : 'none'
+    if (takeoverMode === 'none') {
+      log('warn', '[dsh-tavily] 无法接管搜索提供方：当前 DSH 既没有 web.searchProviderId，也没有 configEditor / @deepseek-ai/dsh-web 行；请在部署配置里把 web.searchProvider 设为 dsh-tavily')
+    }
+  }
+
+  /** Current pinned provider id: composed `web.searchProvider` config, else the env fallback. */
+  function readPinnedProvider() {
+    try {
+      const raw = web.config && web.config.searchProvider
+      const value = raw && typeof raw.get === 'function' ? raw.get() : raw
+      if (typeof value === 'string' && value.length > 0) return value
+    } catch (e) { /* config shape differs; fall through to the env */ }
+    const env = process.env.DSH_WEB_SEARCH_PROVIDER
+    return typeof env === 'string' && env.length > 0 ? env : null
+  }
+
+  /** Whether execution-time selection currently points at this plugin. */
+  function takeoverInstalled() {
+    if (takeoverMode === 'legacy') return overrideInstalled && routeActive
+    if (takeoverMode === 'config') return readPinnedProvider() === PROVIDER_ID
+    return false
+  }
+
+  /**
+   * Reconcile the pin with the switch. Idempotent by design: it only writes when
+   * the composed value disagrees with the desired state, so the Loader reload it
+   * triggers (which restarts this plugin's `web` dependency) settles in one pass.
+   */
+  let takeoverQueue = Promise.resolve()
+  function syncTakeover() {
+    if (takeoverMode !== 'config') return Promise.resolve()
+    if (takeoverBusy) return takeoverQueue
+    takeoverQueue = takeoverQueue.then(async () => {
+      const desired = routeActive && providerRegistered
+      const pinned = readPinnedProvider()
+      const editor = typeof ctx.get === 'function' ? ctx.get('configEditor') : undefined
+      const entry = findWebEntry(ctx)
+      if (!editor || !entry) return
+      takeoverBusy = true
+      try {
+        if (desired && pinned !== PROVIDER_ID) {
+          await editor.edit(entry, (current) => {
+            // Capture what selection would have been without us, so the off switch
+            // restores it exactly instead of guessing a default.
+            data.takeover.savedConfig = { ...current }
+            data.takeover.pinnedByUs = true
+            return { ...current, searchProvider: PROVIDER_ID }
+          })
+          takeoverError = null
+          await persist().catch(() => {})
+        } else if (!desired && pinned === PROVIDER_ID && data.takeover.pinnedByUs) {
+          const saved = data.takeover.savedConfig
+          await editor.edit(entry, (current) => {
+            const next = { ...current }
+            if (saved && Object.prototype.hasOwnProperty.call(saved, 'searchProvider')) {
+              next.searchProvider = saved.searchProvider
+            } else {
+              delete next.searchProvider
+            }
+            return next
+          })
+          data.takeover = emptyTakeover()
+          takeoverError = null
+          await persist().catch(() => {})
+        }
+      } catch (e) {
+        const message = e && e.message ? String(e.message) : String(e)
+        if (/nested/i.test(message)) {
+          // Expected at activation: the profile reconcile owns the transaction.
+          // Leave `takeoverError` clean — the caller sees `pending` and retries
+          // from its own request context.
+          takeoverError = null
+        } else {
+          takeoverError = message
+          log('warn', `[dsh-tavily] 接管搜索提供方失败: ${takeoverError}`)
+        }
+      } finally {
+        takeoverBusy = false
+      }
+    }).catch(() => {})
+    return takeoverQueue
   }
 
   //# provider registration ----
@@ -694,8 +822,23 @@ export async function apply(ctx, config) {
   function recompute() {
     const cfg = currentConfig()
     routeActive = cfg.enabled === true && usableKeys(data).length > 0
+    // No write here: activation runs inside the profile's HMR transaction, and
+    // configEditor opens its own exclusive one (a nested call is rejected). The
+    // toggle endpoint and the panel's ensure call do the write from a request
+    // context, which is outside any transaction; `routing.pending` reports the gap.
   }
   recompute()
+
+  /** Wait for the in-flight takeover write, bounded so an HTTP response can never hang on it. */
+  async function settleTakeover(ms = 8000) {
+    await Promise.race([
+      syncTakeover(),
+      new Promise((resolve) => {
+        const timer = setTimeout(resolve, ms)
+        if (timer && typeof timer.unref === 'function') timer.unref()
+      }),
+    ])
+  }
 
   //# debounced persistence for hot-path stat writes ----
   let flushTimer = null
@@ -768,17 +911,25 @@ export async function apply(ctx, config) {
       }
     }
     return {
-      version: '0.1.1',
+      version: '0.2.0',
       config: cfg,
       configSource: 'file',
       dataPath,
       routing: {
-        active: routeActive && providerRegistered,
+        // `active` means "calls actually reach Tavily", not merely "switch is on":
+        // it folds in the takeover so a stale switch can never look effective.
+        active: routeActive && providerRegistered && takeoverInstalled(),
         providerRegistered,
+        mode: takeoverMode,
+        installed: takeoverInstalled(),
+        // The switch is on but the pin is not ours: the panel asks for a repair.
+        pending: takeoverMode === 'config' && routeActive && providerRegistered && readPinnedProvider() !== PROVIDER_ID,
+        pinnedProvider: readPinnedProvider(),
         overrideInstalled,
         baselineId: baseline === undefined ? null : baseline,
         registeredProviders: Array.from(web.searchProviders ? web.searchProviders.keys() : []),
         officialDetected: Boolean(web.searchProviders && web.searchProviders.has && web.searchProviders.has('deepseek-official')),
+        error: takeoverError,
       },
       keys: keysView,
       order: [...data.order],
@@ -830,6 +981,20 @@ export async function apply(ctx, config) {
         sendJson(res, 500, { ok: false, error: `配置落盘失败: ${e && e.message}` }); return
       }
       recompute()
+      // The toggle is the one action whose whole point is the pin: wait for the
+      // write so the response already reports the new routing state.
+      await settleTakeover()
+      sendJson(res, 200, { ok: true, state: publicState() })
+    },
+
+    /**
+     * Ensure the pin matches the switch. Exists because the write must happen from a
+     * request context: activation runs inside the profile reconcile's HMR transaction
+     * and configEditor cannot open a nested one.
+     */
+    async takeover(req, res) {
+      recompute()
+      await settleTakeover()
       sendJson(res, 200, { ok: true, state: publicState() })
     },
 

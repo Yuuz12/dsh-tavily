@@ -35,11 +35,13 @@ Restart DSH afterwards. If an older copy exists in the profile, `remove` before 
 
 ## How replacement works
 
-`ctx.web` resolves the search provider at call time via `WebRuntime.searchProviderId` (configured id wins, otherwise the single usable provider runs). This plugin:
+`ctx.web` resolves the search provider on every call, and where it reads the choice from differs by DSH version. Both shapes are supported:
 
-1. registers a provider `{ id: 'dsh-tavily' }` through the public seam API;
-2. redefines that instance field as a reversible accessor — reads yield `'dsh-tavily'` while the switch is on and at least one key is usable, otherwise the untouched baseline (undefined or `$DSH_WEB_SEARCH_PROVIDER`);
-3. keeps `available()` consistent with the same condition, so even if a future runtime ignores the field, auto-selection degrades to the official provider instead of reporting ambiguity.
+1. the provider `{ id: 'dsh-tavily' }` registers through the public seam API;
+2. **DSH ≥ 0.2.x (current)**: the service reads the `searchProvider` config composed for its own `@deepseek-ai/dsh-web` Loader row (the official base layer pins `deepseek-official`). The plugin writes `searchProvider: dsh-tavily` through `ctx.configEditor.edit()`, which lands in the active profile's `cordis.patch.yml` and hot-applies. Turning the switch off restores the effective config captured just before the write (and the row is dropped entirely when that value equals the inherited one). The captured value survives restarts, so the pin stays valid.
+   - The write must originate in a **request context**: activation itself runs inside the profile reload's HMR transaction and `configEditor` opens its own exclusive one, so a nested call is rejected (`HMR transactions cannot be nested`). Opening the panel therefore calls `POST /api/dsh-tavily/takeover` once to repair the gap that `routing.pending` reports.
+3. **DSH ≤ 0.1.x (legacy)**: the runtime read a mutable `web.searchProviderId`, which this plugin redefines as a reversible accessor while the switch is on.
+4. `available()` matches the same condition, so a build with no takeover surface degrades to the official provider instead of reporting ambiguity; `routing.mode` is then `none`.
 
 ## Data locations
 
@@ -48,5 +50,7 @@ Keys, stats, the toggle and the search parameters all live in `<profile>/dsh-tav
 ## Authentication
 
 The card's HTTP endpoints are registered as **exact routes under `/api/dsh-tavily/...`**, never as a prefix route of their own. The webServer dispatches by exact path → longest prefix → fallback, and a deployment's auth gate sits on the *empty* prefix — the weakest slot — so a plugin-declared prefix would outrank it and serve anonymous callers. That holds even for a nested prefix such as `/api/dsh-tavily`: gates own the `/api` prefix plus the **exact** routes beneath it (re-scanned, so late registrations are caught), while a plugin prefix wins longest-prefix dispatch before the gate is ever consulted. With exact routes these endpoints inherit exactly the same admission policy as the rest of the WebUI API: password session cookie, or the loopback host-direct exemption a desktop shell relies on. Deployments with no auth plugin stay as open as before.
+
+> Uninstall note: turn the switch off before removing the plugin. The off switch restores the `web` row; a plugin removed while it still owns the pin leaves `searchProvider: dsh-tavily` behind, and searches fail with `WEB_PROVIDER_CONFIGURED_MISSING` until you delete that `config:` block from the profile's `cordis.patch.yml`.
 
 See the Chinese README for scheduling rules, FAQ, and development notes.
